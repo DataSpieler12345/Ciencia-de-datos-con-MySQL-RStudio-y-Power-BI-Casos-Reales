@@ -1,0 +1,195 @@
+---
+title: "Pronostico de ventas"
+subtitle: "Estimación de ventas sin cambios estructurales"
+author: "Franz Scheller"
+date: '`r format(Sys.Date(), "%B %Y")`' 
+output:
+  html_document:
+    code_folding: show
+    theme: "cosmo"
+    highlight: pygments
+    text-align: center
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DBI)
+library(RMySQL)
+library(RJDBC)
+
+library(dplyr)
+library(tidyr)
+library(fpp2)
+library(tidyverse)
+library(tseries)
+library(foreign)
+library(timsac)
+library(forecast)
+library(stats)
+library(strucchange)
+library(ggplot2)
+library(dygraphs)
+library(xts)
+library(kableExtra)
+
+options(scipen = 999)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+mydrv <- dbDriver("MySQL")
+
+conn <- dbConnect(mydrv, dbname="retail",host="localhost",port=3306, user="root",password="root")
+
+data_ventas <- dbGetQuery(conn, statement = "SELECT MONTH(`invoicedate`) AS month, YEAR(`invoicedate`) AS year, SUM(`price`) AS ventas FROM transa WHERE `price`>0 AND `invoicedate` <'2011-12-01' GROUP BY YEAR(`invoicedate`), MONTH(`invoicedate`)")
+                         
+dbDisconnect(conn)
+```
+
+## Serie de tiempo de las ventas
+
+Está representado por la serie cronológica o historóca del conjunto de conjunto de datos numéricos que expresan las ventas en períodos regulares y específicos a través del tiempo para reconocer su evolucion, tendencia y estacionalidad. la siguietne gráfica presenta periodicidad mensual de las ventas.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ts_ventas<- ts(data_ventas[,3], start = c(2009,12), frequency = 12)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+dygraph(ts_ventas, main = "Evolución histórica de las ventas") %>% dyRangeSelector()
+```
+
+## Evaluacion de la estacionalidad de la serie
+La observación del anuncio de Autocorrelación 'ACF' permite conocer si estamos frente a una serie **Estacionario o no**, si los resultados se encuentran dentro de los limites de significancia (espacio entre las lineas punteadas) estamos frente a estacionalidad, en caso cntrario se trata de una serie no estacionaria. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+acf(ts_ventas)
+```
+
+## Prueba de Dicke-Fuller
+
+Es de gran importancia realizar pruebas formales para comprobar si estamos frente a  una serie estacional o no, y la prueba de Dickey-fuller aumentada para la hipostesis nula de una raiz unitaria de una serie de tiempo. Basicamente el resultado del  'p-value' si es `p-value`si es `<.05` es una serie que no tiene raices unitarias, es decir que es "Estacionaria", de lo contrario si `p-value` es `>.05`es una serie de raices unitarias, es decir, una serie "No estacionaria". 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+adf.test(ts_ventas)
+```
+
+## Exploracion grafica formal de la serie
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+descom <-decompose(ts_ventas)
+autoplot(descom)
+```
+
+## Crear el modelo ARIMA
+
+En el analisis de Series temporales, la metodologia de BOX-JENKINS, nombrado asi en honor a las estadisticas George E.P. Box y Gwilym Jenkins, se aplica a los modelos autorregresivos de media movil (ARMA) o la los modelos autorregresivos integrados de media movil (ARIMA) para encontrar el mejor ajuste de  una serie temporal de valores a fin de que los pronosticos sean mas acertados.
+
+La funcion "auto.arima" de la libreria de "R", proporciona una opcion rapida para construir pronosticos con series temporales, debido a que evalua entre todos los posibles modelos, al mejor modelo considerando diversos criterios: *estacionariedad*, *estacionalidad*, *diferencias*, entre otras. 
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+modelo_ventas <- auto.arima(ts_ventas, d=1,D=1, stepwise = FALSE, approximation = FALSE, trace = FALSE)
+```
+
+## Resumen del modelo
+
+En estadistica y econometria, en particular en series temporales, un modelo autoregresivo integrado de promedio movil o ARIMA (Acronimo del ingles autoregressive integrated moving average) es un modelo estadistico que utiliza variaciones y regresiones de datos estadisticos con el fin de encontrar patrones para una prediccion hacia el futuro. Se trata de un modelo dinamico de series temporales, es decir, las estimaciones futuras vienen explicadas por los datos del pasado y no por variables independientes.
+[wikipedia](https://es.wikipedia.org/wiki/Metodolog%C3%ADa_de_Box-Jenkins)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(modelo_ventas)
+```
+
+## Revision de los Residuales para evaluar la calidad del modelo
+
+al llevar a cabo el modelo de pronostico ARIMA siempre es necesario analizar el comportamiento de los residuos, en este caso nos interesa analizar s i estos residuos se comportan como ruido blanco. 
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+tsdiag(modelo_ventas)
+```
+
+## Aplicamos la prueba BOX-PIERCE o L JUNG-BOX para examinar la hipotesis nula de independencia en una serie de tiempo.
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+Box.test(residuals(modelo_ventas), type = "Ljung-Box")
+# Ruido blanco si p > .05 entonces se ajusto bien.
+```
+
+## Observamos la normalidad de los residuales
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+checkresiduals(modelo_ventas)
+```
+
+## Prueba de normalidad de residuales
+
+La prueba de normalidad de Shapiro-Wilk otorga la distribucion de los residuales y lo que se espera que tengan promedio alrededor de "0".
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+shapiro.test(modelo_ventas$residuals)
+```
+
+## Calculo del pronostico de la funcion `forecast`
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+fcst_ventas <- forecast(modelo_ventas, h = 6)
+```
+
+## Resumen del pronostico
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(fcst_ventas)
+```
+
+## Tabla del pronostico
+
+Los pronosticos se basan en patrones de los datos existentes en la serie analizada, tomando en cuenta la autocorrelacion (dependencia) entre los datos, tendencia, estacionalidad y cambios estructurales.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kable(fcst_ventas, caption = "Pronostico de Ventas", booktabs = T) %>%
+        kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+data <- fcst_ventas$x
+lower <- fcst_ventas$lower[,2]
+upper <- fcst_ventas$upper[,2]
+pforecast <- fcst_ventas$mean
+
+mydata <- cbind(data, lower, upper, pforecast)
+```
+
+## Grafica de la serie historica con el pronostico incorporado
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+dygraph(mydata, main = "Evolucion de las Ventas") %>%
+        dyRangeSelector() %>%
+        dySeries(name = "data", label = "Venta Historica") %>%
+        dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+        dyAxis("y", label = "Dolares americanos") %>%
+        dyHighlight(highlightCircleSize = 5,
+                    highlightSeriesOpts = list(strokeWidth = 2)) %>%
+                    dyOptions(axisLineColor = "navy", gridLineColor = "grey")
+```
+
+# Conclusion
+
+Para el *pronostico de los proximos 6 meses, de las ventas*, se aplicaron tecnicas de analisis de series temporales evaluando ***su estacionalidad*** y finalmente se realizo en ***forecast***, que muestra los resultados de *80%* y *95%* de intervalo de confianza.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
