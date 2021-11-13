@@ -1,0 +1,296 @@
+---
+title: "Analisis de la cesta de compra de los clientes"
+subtitle: "Uso de algoritmo Apriori"
+author: " by Franz Scheller"
+date: '`r format(Sys.Date(), "%B %Y")`' 
+output:
+  html_document:
+    code_folding: show
+    theme: "cosmo"
+    highlight: pygments
+    text-align: center
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(arules)
+library(arulesViz)
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(ggplot2)
+library(lubridate)
+library(plyr)
+library(DT)
+library(DBI)
+library(RJDBC)
+library(RMySQL)
+library(dplyr)
+
+setwd("E:/E-PLATTTFORMS/UDEMY/Ciencia de datos con MySQL, RStudio y Power BI Casos Reales")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Llamar al archivo de conexion
+source("conexion.R")
+
+dbGetQuery(conn, "set names utf8")
+
+ventas <-dbGetQuery(conn, statement = "SELECT transa.invoice AS id, DATE_FORMAT(transa.invoicedate, '%d/%m/%y') AS fecha, productos.descripcion FROM transa JOIN productos ON transa.stockcode = productos.stockcode WHERE transa.price >0")
+
+
+dbDisconnect(conn)
+```
+
+## *Presentacion*
+
+<div class=text=justify>
+Es una gran cantidad de transacciones de ventas, en cojunto con cierta variedad de productos, la tecnica de Mineria de Datos denominada **Reglas de Asociacion** resulta interesante porque le permite descubrir algunas relaciones comerciales entre productos (atractivos para clientes, ventas cruzadas) que no se perciben a simple vista usando esta tecnica se puede contribuir a mejorar el nivel de ventas, creando packs o combos de promocion, etc. 
+<div>
+
+# *Acerca de los Datos*
+
+Los datos de transacciones para este analisis corresponden a las ventas.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+dim(ventas)
+```
+
+# Revision de la estructura del `data.frame´en la que observamos la cantidad de registros de ventas
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ventas$descripcion <- as.factor(ventas$descripcion)
+ventas$fecha <- as.Date(ventas$fecha)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ventas$descripcion <- gsub(","," ", ventas$descripcion) # Cambiar el caracter "," existente en la descripción
+ventas$descripcion <- gsub(" - ", " ", ventas$descripcion) # Cambiar el caracter "," existente en la descripción
+ventas$descripcion <- gsub("'",  " ", ventas$descripcion) # Cabiar el caracter "," existente en la descripción
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+transacciones <- ddply(ventas,c("id","fecha"),
+                       function(df1)paste(df1$descripcion,
+                                          collapse = ","))
+transacciones$id <- NULL
+transacciones$fecha <- NULL
+colnames(transacciones) <- c("Productos")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+write.csv(transacciones, "transacciones.csv", quote = FALSE, row.names = FALSE)
+tr <- read.transactions("transacciones.csv", quote = 'basket', sep=',')
+```
+
+# *Exploracion de los datos a traves del formato de objeto ´transaction´*
+
+Revision general del objeto `tr`en donde se identifican aspectos interesantes como la cantidad de transacciones unicas, los items con mayor frecuencia y la cantidad de productos por transacciones.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(tr)
+```
+
+* En **transactions as itemMatrix in sparse format with** se pueden observar la cantidad de filas (***rows***) que representan transacciones unicas.
+* En **most frecuent items** se encuentran los primeros **5** item con mayor frecuencia en las transacciones.
+* En **element (itemset/transaction) length distribution** se observa la cantidad de transacciones con la cantidad de items en la transaccion, en este analisis va de **1** a **muchos**.
+
+```{r echo=FALSE}
+df_transacciones <- as(tr, Class = "data.frame")
+#Para que el tamano de la tabla se ajuste mejor, se convierte el dataframe a tibble
+as.tibble(df_transacciones) %>% head()
+```
+
+```{r include=FALSE}
+tamanyos <- size(tr)
+# summary(tamanyos)
+```
+
+## *Distribucion del tamano de las transacciones*
+
+Cuando se realiza una representacion grafica de las transacciones por su cantidad de items que incluye, la distribucion queda de la siguiente manera. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+data.frame(tamanyos) %>% 
+  ggplot(aes(x = tamanyos)) + 
+  geom_histogram() +
+  labs(title =  "Distribucion del tamano de las transacciones",
+       x = "Tamano")
+  theme_bw()
+```
+
+## *Observacion grafica del TOP 10 items frecuentes de forma absoluta*
+
+El Top 10 de los items con mayor frecuencia tanto absoluta (*Cantidad de transacciones*) como relativa (*porcentaje del total de transacciones*) son los siguientes.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+itemFrequencyPlot(
+  tr,
+  topN = 10,
+  main = "Top 10 Frecuencia Absoluta por Item",
+  type = "absolute",
+  ylab = "",
+  horiz = TRUE,
+  col = rainbow(10))
+```
+
+## *Observacion grafico del TOP 10 de los items con mayor frecuencia relativa*
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+itemFrequencyPlot(
+  tr,
+  topN = 10,
+  main = "Top 10 Frecuencia Relativa por items",
+  type = "relative",
+  horiz = TRUE, 
+  col = rainbow(5))
+```
+
+## *Aplicacion del algoritmo `Apriori`
+
+El algoritmo **Apriori** es un algoritmo utilizado en mineria de datos, sobre bases de datos transacciones, que permite encontrar de forma eficiente "conjuntos de itemes frecuentes", los cuales sirven de base para generar reglas de asociacion. [Wikipedia](https://es.wikipedia.org/wiki/Algoritmo_apriori#:~:text=El%20algoritmo%20a%20priori%20es,para%20generar%20reglas%20de%20asociaci%C3%B3n)
+
+A la funcion `Apriori` se le enviaron hiperparametros de *Soporte = 0.0008 y Confianza = 0.8*.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+reglas.asociacion <- apriori(tr, parameter = list(supp=0.007, conf=0.8, maxlen=10))
+```
+
+Se observa que el **el writting...[18 rules(s)]** senala que para los hiperparametros del algoritmo `apriori`se encontraron **18 asociaciones** de productos, y el detalle de cada regla se observa a continuacion.
+
+En las principales **Reglas de Asociacion de productos** encontradas, se presente la siguiente informacion:
+
+1. **LHS**: Producto (o combinacion de productos vendidos).
+2. **RHS**: Producto que probablemente se venda a partir del o los anterior(es).
+3. **Support**: El soporte nos dice que tan frecuente es un elemento o un conjunto de elementos **(de la columna LHS)** en todos los datos.
+Basicamente, nos dice que tan popular es un conjunto de elementos en el conjunto de datos analizado (*datos decimales que representan datos porcentuales*).
+4. **confidence**: La confianza nos dice que tan probable es un *consecuente* cuando ha ocurrido el *antecedente*. HAciendo de forma analoga a la regla anterior. Qué probabilidad hay de que alguien compre el proucto en la columna **RHS** cuando ya ha comprado el de la columna **LHS**
+5. **Coverage**: es el sporte de la parte izquierda de la regla (antecedente). Se interpreta como la frecuencia con la que el antecendete aparece en el conjunto de transacciones. 
+6. **lift**: El levantamiento nos dice que tan probable es el consecuente cuando el antecendente ya ha ocurrido, teniendo en cuenta el soporte de ambos antecendentes y consecuentes; si es <1 *no es problable*; so es >1 *es muy probable*. 
+7. **count**: Cantidad de veces que ha ocurrido.
+
+# *Resumen del modelo*
+
+Una revision del resumen estadistico de las reglas obtenidas, se observan medidas estadisticas de **minimo, mediana, promedio y cuartiles**  para los resultados de **soporte, confianza, covertung, lift y conteo**.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+summary(reglas.asociacion)
+```
+
+Las *Reglas de Asociacion* hacen visible saber si un cliente compra un producto **X**,que tan probable es que compre el producto **Y**, donde estos dos productos estan relacionados porque otros clietes los compraron en conjunto. 
+
+## **Inspeccion de las reglas de asociacion encontradas**
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#inspect(reglas.asociacion)
+inspectDT.rules <- function(x, precision = 3, ...) { 
+  df <- DATAFRAME(reglas.asociacion)
+  DT::datatable(df,
+    filter = "top",
+    rownames = paste0('[', rownames(df), ']'),
+    ...) %>% 
+    DT:: formatRound(columns =  which(sapply(df, is.numeric)), digits = max(precision))
+}
+inspectDT(reglas.asociacion)
+```
+
+## *Reglas ordenadas por `lift`*
+<div class=text=justify>
+El estadistico **lift** compara la frecuencia observada de una regla con la frecuencia esperada simplemente por azar (si la regla no existe realmente). El valor lift de una regla "si X, entonces Y". Cuando mas se aleje el valor de lift de 1, mas evidencias de que la regla no se debe a un artefacto aleatorio, es decir, mayor la evidencia de que la regla representa un patron real..Fuente: 
+[Wikipedia](https://es.wikipedia.org/wiki/Reglas_de_asociaci%C3%B3n).
+</div>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+inspectDT(head(sort(reglas.asociacion, by = "lift")))
+```
+
+# *Grafico de las reglas de asociacion encontradas*
+
+Observacion de la dispersion de las reglas por los tres parametros: `confidence` en el eje **"y"**, `support` en el eje **"x"** y `lift`en la intensidad del color del punto de datos.
+*(Grafico interactivo en formato html)* **haz clic sobre el grafico**.
+
+```{r echo=FALSE, fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+plot(reglas.asociacion, engine = "plotly")
+```
+
+## *Matriz Grafica*
+
+De forma similar se pueden observar las reglas encontradas en los datos, en una matriz grafica, representando los items que se encuentran del lado izquierdo de la regla `LHS`, los que se encuentran en el lado derecho de la regla `RHS`y el tamano del punto de datos por `lift`y color por `confidence`.
+
+```{r eval=FALSE, fig.height=10, fig.width=11, message=FALSE, warning=FALSE, include=FALSE}
+plot(reglas.asociacion,
+     method = "grouped",
+     measure = "lift",
+     shading = "confidence")
+```
+
+
+
+
+## *Red de Reglas de asociacion con el algoritmo Apriori*
+
+En esta grafica se observa la relacion entre los distintos items entre las reglas de asociacion encontradas:
+*(Grafico interactivo en formato html)* **Haz clic sobre el grafico**.
+
+```{r echo=FALSE, fig.height=8, fig.width=8, message=FALSE, warning=FALSE}
+plot(reglas.asociacion, method ="graph", engine = "htmlwidget")
+```
+
+## *Resumen del top 10 de las reglas de asociacion encontradas por `lift`*
+
+Del total de las reglas encontradas se extrae un subgrupo de las primeras 10 con mayor `lift`
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+top10reglas <- head(reglas.asociacion, n = 10, by = "lift")
+```
+
+## *Grafico de coordinadas paralelas del Top 5 de reglas por `lift`*
+
+Las graficas de coordinadas paralelas estan diseñadas para visualizar datos multidimensionales donde cada dimension se muestra por separado en el eje `x` y el eje `y` se comparte. Cada punto de datos es representado por una linea que  conecta los valores de cada dimension. Se muestran los elementos en el eje `Y`como los valores nominales y el eje `x` represneta las posiciones en una regla, es decir, primer elemento, segundo elemento, etc. Se utiliza una linea simple y una flecha donde la cabeza apunta al elemento consecuennte. Las flechas solo se extienden suficientes posiciones en el eje `X` para representar todos los elementos de la regla, es decir, reglas con menos elementos son flechas mas cortas. 
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+plot(top10reglas, method = "paracoord", showPoints = TRUE)
+```
+
+El ancho de las flechas representa el apoyo y la intensidad del color representan confianza.
+
+## *Red Grafica del top 5 de reglas de asociacion ordenadas por `lift`*
+
+```{r echo=FALSE, fig.height=8, message=FALSE, warning=FALSE}
+plot(top10reglas, method = "graph", engine = "htmlwidget")
+```
+
+# **Conclusiones**
+<br>
+<div class=text-justify>
+El estudio de las **Reglas de asociaciones** es una herramienta de gran utilididad como herramienta de base para la toma de decisiones en la empresa, es un metido eficaz para aprovechar la informacion de datos que hay disponible, ya que permite conocer los habitos de compra de los clientes siendo una importante herramienta de markeeting cuando se desea incrementar indicadores como **ticket medio**, distribucion de Layout en tiendas, armados de **Packs** de productos, etc. ya que se puede usar la informacion para realizar recomendaciones a los clientes sobre productos relacionados y promocionar estos colocandolos muy cerca unos de otros en paginas Web, catalgos o en la misma estanteria, etc. 
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
